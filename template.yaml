@@ -1,9 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Production-ready CloudFormation template to deploy a Lambda that checks an API key 
-  in the request body before sending an email via AWS SES, fronted by an API Gateway 
-  (POST /prod/ses). Logging at the API Gateway level is not enabled.
-
+To deploy a serverless infrastructure using AWS CloudFormation, enabling a secure and scalable REST API for sending emails via AWS Simple Email Service (SES). The solution includes an API Gateway that handles HTTP requests, a Lambda function for email processing, and strict authentication using an API key. This approach ensures high performance and security while avoiding unnecessary logging at the API Gateway level.
 Parameters:
   VerifiedDomainOrEmail:
     Type: String
