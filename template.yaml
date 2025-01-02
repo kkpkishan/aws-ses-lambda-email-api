@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Production-ready CloudFormation template to deploy a Lambda that checks an API key 
+  in the request body before sending an email via AWS SES, fronted by an API Gateway 
+  (POST /prod/ses). Logging at the API Gateway level is not enabled.
+
+Parameters:
+  VerifiedDomainOrEmail:
+    Type: String
+    Default: example.com
+    Description: "A domain or email that is already verified in AWS SES."
+
+  ApiKey:
+    Type: String
+    NoEcho: true
+    Default: 3d90f595-eec7-483a-8112-e5c1efa00dad
+    Description: "API key required by the Lambda to allow sending email."
+
+Resources:
+  # ----------------------------------------------------------------
+  # 1. IAM Role for Lambda
+  # ----------------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: LambdaSESAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Permissions to send emails via SES
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: '*'
+              # Permissions for basic Lambda logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
+  # ----------------------------------------------------------------
+  # 2. Lambda Function
+  # ----------------------------------------------------------------
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "SendEmailSESFunction"
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+          from botocore.exceptions import BotoCoreError, ClientError
+
+          def lambda_handler(event, context):
+              # 1) Parse the JSON body (if invalid JSON, return 400)
+              try:
+                  body = json.loads(event.get("body", "{}"))
+              except json.JSONDecodeError:
+                  return {
+                      "statusCode": 400,
+                      "body": json.dumps({"error": "Invalid JSON in request body"})
+                  }
+
+              # 2) Validate API Key
+              provided_key = body.get("apikey", "")
+              required_key = os.environ.get("API_KEY", "")
+              if provided_key != required_key:
+                  return {
+                      "statusCode": 403,
+                      "body": json.dumps({"error": "Access Denied: Invalid API key"})
+                  }
+
+              # 3) Extract fields required for sending email
+              try:
+                  # The request JSON must include these fields
+                  email_template = body["emailtemplete"]  # as spelled in the request
+                  to_address = body["toaddress"]
+              except KeyError as e:
+                  return {
+                      "statusCode": 400,
+                      "body": json.dumps({"error": f"Missing required field: {str(e)}"})
+                  }
+
+              # 4) Construct the "from" address
+              verified_identity = os.environ.get("VERIFIED_DOMAIN_OR_EMAIL")
+              from_address = f"no-reply@{verified_identity}"
+
+              # 5) Basic email format validation
+              if "@" not in from_address or "@" not in to_address:
+                  return {
+                      "statusCode": 400,
+                      "body": json.dumps({"error": "Invalid email address format"})
+                  }
+
+              # 6) Send the email via SES (assuming domain/email is already verified)
+              ses_client = boto3.client("ses")
+              try:
+                  response = ses_client.send_email(
+                      Source=from_address,
+                      Destination={"ToAddresses": [to_address]},
+                      Message={
+                          "Subject": {"Data": "Test Email from AWS SES"},
+                          "Body": {
+                              "Html": {"Data": email_template},
+                          },
+                      },
+                  )
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({
+                          "message": "Email sent successfully",
+                          "response": response
+                      })
+                  }
+              except (BotoCoreError, ClientError) as e:
+                  # More robust error-handling/reporting in production
+                  return {
+                      "statusCode": 500,
+                      "body": json.dumps({
+                          "error": f"Error sending email via SES: {str(e)}"
+                      })
+                  }
+
+      Environment:
+        Variables:
+          VERIFIED_DOMAIN_OR_EMAIL: !Ref VerifiedDomainOrEmail
+          API_KEY: !Ref ApiKey
+
+  # ----------------------------------------------------------------
+  # 3. API Gateway (POST /prod/ses)
+  # ----------------------------------------------------------------
+  APIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: SESLambdaAPI
+
+  GatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: ses
+      RestApiId: !Ref APIGateway
+
+  GatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref GatewayResource
+      RestApiId: !Ref APIGateway
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations
+
+  # ----------------------------------------------------------------
+  # 4. Grant API Gateway permission to invoke the Lambda function
+  # ----------------------------------------------------------------
+  LambdaPermissionForAPIGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGateway}/*/POST/ses"
+
+  # ----------------------------------------------------------------
+  # 5. Deployment & Stage (with no logging enabled)
+  # ----------------------------------------------------------------
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref APIGateway
+      StageName: prod
+    DependsOn: GatewayMethod
+
+Outputs:
+  APIEndpoint:
+    Description: "POST endpoint for sending emails via AWS SES."
+    Value: !Sub "https://${APIGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/ses"
