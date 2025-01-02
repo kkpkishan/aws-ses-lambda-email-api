@@ -19,7 +19,7 @@ This project provides an AWS CloudFormation template to deploy an API Gateway an
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-username/aws-ses-lambda-email-api.git
+git clone https://github.com/kkpkishan/aws-ses-lambda-email-api.git
 cd aws-ses-lambda-email-api
 ```
 
